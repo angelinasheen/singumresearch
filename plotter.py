@@ -6,11 +6,11 @@ manhattan_gdf = gpd.read_file("manhattan_boundaries.geojson")
 
 fig, ax = plt.subplots()
 
-manhattan_gdf.plot(ax=ax, facecolor=None, edgecolor=None, linewidth=1)
+manhattan_gdf.plot(ax=ax, facecolor="Green", edgecolor=None, linewidth=1)
 
 # just plot each singum i guess
-singum_gdf = None
-# singum_gdf.plot(ax=ax, facecolor="black", edgecolor="red", linewidth=1)
+singum_gdf = gpd.read_file("singum_voronoi.geojson")
+singum_gdf.plot(ax=ax, facecolor=None, edgecolor="red", linewidth=.3, alpha=.5)
 
 plt.title("visualize singums")
 plt.show()

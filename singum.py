@@ -3,7 +3,6 @@ import pandas as pd
 from load_data import load_lion_gdf
 from scipy.spatial import Voronoi
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
-from shapely.ops import unary_union
 from collections import defaultdict
 import math
 import itertools
@@ -14,7 +13,7 @@ import numpy as np
 
 #read data
 gdf = load_lion_gdf()
-nyc_boundaries()
+# nyc_boundaries()
 #manhattan_census()
 #nyc_raster()
 #downsample_raster(
@@ -90,11 +89,15 @@ voronoi_gdf = gpd.GeoDataFrame({
     "geometry": poly_geoms
 }, crs=gdf.crs)  # make sure CRS matches original
 voronoi_gdf = voronoi_gdf.dissolve(by="NodeID", as_index=False)
-voronoi_gdf.to_file("singum_voronoi.geojson", driver="GeoJSON")
+
+manhattan_gdf = gpd.read_file("manhattan_boundaries.geojson")
+
+filtered_voronoi = voronoi_gdf[voronoi_gdf.geometry.intersects(manhattan_gdf.iloc[0].geometry)]
+filtered_voronoi.to_file("singum_voronoi.geojson", driver="GeoJSON")
 
 print("Before clipping:", len(poly_geoms))
-print("After clipping:", len(voronoi_gdf))
-print("Unique NodeIDs after clipping:", voronoi_gdf['NodeID'].nunique())
+print("After clipping:", len(filtered_voronoi))
+print("Unique NodeIDs after clipping:", filtered_voronoi['NodeID'].nunique())
 
 
 
