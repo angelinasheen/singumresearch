@@ -1,8 +1,8 @@
 import geopandas as gpd
-import rasterio
-from rasterio.mask import mask
-import rasterio
-from rasterio.enums import Resampling
+# import rasterio
+# from rasterio.mask import mask
+# import rasterio
+# from rasterio.enums import Resampling
 
 
 def load_lion_gdf():

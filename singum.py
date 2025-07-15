@@ -7,12 +7,13 @@ from collections import defaultdict
 import math
 import itertools
 from load_data import nyc_boundaries, nyc_raster, downsample_raster, manhattan_census
-from rasterstats import zonal_stats
+# from rasterstats import zonal_stats
 from fiona import listlayers
 import numpy as np
 
 #read data
 gdf = load_lion_gdf()
+gdf = gdf.to_crs(epsg=4326)
 # nyc_boundaries()
 #manhattan_census()
 #nyc_raster()
@@ -90,9 +91,10 @@ voronoi_gdf = gpd.GeoDataFrame({
 }, crs=gdf.crs)  # make sure CRS matches original
 voronoi_gdf = voronoi_gdf.dissolve(by="NodeID", as_index=False)
 
-manhattan_gdf = gpd.read_file("manhattan_boundaries.geojson")
+# from https://gist.github.com/ix4/6f44e559b29a72c4c5d130ac13aad317?short_path=467dc07
+nyc_gdf = gpd.read_file("nycfull.geojson")
 
-filtered_voronoi = voronoi_gdf[voronoi_gdf.geometry.intersects(manhattan_gdf.iloc[0].geometry)]
+filtered_voronoi = voronoi_gdf[voronoi_gdf.geometry.intersects(nyc_gdf.iloc[0].geometry)]
 filtered_voronoi.to_file("singum_voronoi.geojson", driver="GeoJSON")
 
 print("Before clipping:", len(poly_geoms))

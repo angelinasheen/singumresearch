@@ -1,12 +1,14 @@
 from shapely.geometry import Polygon, MultiPolygon
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import load_data
 
-manhattan_gdf = gpd.read_file("manhattan_boundaries.geojson")
+nyc_gdf = gpd.read_file("nyc.geojson")
 
 fig, ax = plt.subplots()
 
-manhattan_gdf.plot(ax=ax, facecolor="Green", edgecolor=None, linewidth=1)
+nyc_gdf.plot(ax=ax, facecolor="Green", edgecolor=None, linewidth=1)
+
 
 # just plot each singum i guess
 singum_gdf = gpd.read_file("singum_voronoi.geojson")
