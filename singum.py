@@ -1,29 +1,15 @@
 import geopandas as gpd
 import pandas as pd 
-from load_data import load_lion_gdf
 from scipy.spatial import Voronoi
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from collections import defaultdict
 import math
 import itertools
-from load_data import nyc_boundaries, nyc_raster, downsample_raster, manhattan_census
-# from rasterstats import zonal_stats
 from fiona import listlayers
 import numpy as np
 
-#read data
-gdf = load_lion_gdf()
-gdf = gdf.to_crs(epsg=4326)
-# nyc_boundaries()
-#manhattan_census()
-#nyc_raster()
-#downsample_raster(
-    #input_path="nyc_pop_density.tif",
-    #output_path="nyc_pop_density_downsampled.tif",
-    #scale_factor=4  # 4x coarser in width & height → 16x fewer pixels
-#)
-
-# ----------------------------------- DRAWING SINGUMS --------------------------------------
+#just change where the gdf comes from
+gdf = gpd.read_file("nj_edges.geojson")
 
 #find coordinates of each node + whether it's start/end node 
 def extract_coord(geom, from_end=True):
@@ -46,10 +32,10 @@ node_to_coord = {}
 
 #when this for loop ends every node should be mapped to its start nodes and end nodes
 for _, row in gdf.iterrows(): #each row in gdf is a road segment
-    node_to_segments[row.NodeIDFrom].append((row.geometry, row.To_Coord)) #for each start node of segment add end and geo
-    node_to_segments[row.NodeIDTo].append((row.geometry, row.From_Coord)) #for each end point add start point and geo
-    node_to_coord[row.NodeIDFrom] = row.From_Coord #assign coordinate to node
-    node_to_coord[row.NodeIDTo] = row.To_Coord 
+    node_to_segments[row.u].append((row.geometry, row.To_Coord)) #for each start node of segment add end and geo
+    node_to_segments[row.v].append((row.geometry, row.From_Coord)) #for each end point add start point and geo
+    node_to_coord[row.v] = row.From_Coord #assign coordinate to node
+    node_to_coord[row.u] = row.To_Coord
 
 
 #build array of coordinates and match index to NodeID
@@ -85,101 +71,17 @@ assert len(poly_geoms) + skipped == len(unique_node_ids)
 
 
 #create GeoDataFrame
+boundary_gdf = gpd.read_file("nj_boundaries.geojson")
 voronoi_gdf = gpd.GeoDataFrame({
     "NodeID": poly_ids,
     "geometry": poly_geoms
-}, crs=gdf.crs)  # make sure CRS matches original
+}, crs=boundary_gdf.crs)  # make sure CRS matches comparison
 voronoi_gdf = voronoi_gdf.dissolve(by="NodeID", as_index=False)
 
-# from https://gist.github.com/ix4/6f44e559b29a72c4c5d130ac13aad317?short_path=467dc07
-nyc_gdf = gpd.read_file("nycfull.geojson")
+filtered_voronoi = voronoi_gdf[voronoi_gdf.geometry.intersects(boundary_gdf.iloc[0].geometry)]
 
-filtered_voronoi = voronoi_gdf[voronoi_gdf.geometry.intersects(nyc_gdf.iloc[0].geometry)]
-filtered_voronoi.to_file("singum_voronoi.geojson", driver="GeoJSON")
+filtered_voronoi.to_file("nj_singum_voronoi.geojson", driver="GeoJSON")
 
 print("Before clipping:", len(poly_geoms))
 print("After clipping:", len(filtered_voronoi))
 print("Unique NodeIDs after clipping:", filtered_voronoi['NodeID'].nunique())
-
-
-
-'''
-# ---------------------------------------ADDING POPULATION VALUES -------------------------------------------
-
-SINGUM_PATH = "singum_nodes.geojson"
-RASTER_PATH = "nyc_pop_density_downsampled.tif"
-OUTPUT_PATH = "singum_with_population.geojson"
-CHUNK_SIZE = 100  # number of polygons to process at once
-
-singum_gdf = gpd.read_file(SINGUM_PATH)
-
-#simplify singum geometry 
-singum_gdf["geometry"] = singum_gdf["geometry"].simplify(0.0001, preserve_topology=True)
-singum_gdf = singum_gdf[singum_gdf.is_valid & ~singum_gdf.is_empty]
-
-#chunked zonal stats ===
-def compute_population_in_chunks(gdf, raster_path, chunk_size=100):
-    pop_values = []
-    for i in range(0, len(gdf), chunk_size):
-        print(f"processing chunk {i} to {i+chunk_size}")
-        chunk = gdf.iloc[i:i+chunk_size]
-        stats = zonal_stats(
-            chunk,
-            raster_path,
-            stats=["sum"],
-            geojson_out=True,
-            all_touched=True
-        )
-        pop_chunk = [s["properties"]["sum"] if s["properties"]["sum"] is not None else 0 for s in stats]
-        pop_values.extend(pop_chunk)
-    return pop_values
-
-#run zonal stats
-pop_vals = compute_population_in_chunks(singum_gdf, RASTER_PATH, chunk_size=CHUNK_SIZE)
-singum_gdf["population"] = pop_vals
-
-singum_gdf.to_file(OUTPUT_PATH, driver="GeoJSON")
-
-'''
-#------------------------------------CLASSIFYING SINGUMS BASED ON TYPE ----------------------------------------
-'''
-#paths
-gdb_path = "buildingtype/pluto.gdb"
-pluto_layer = "MapPLUTO_25v1_1_clipped"
-singum_path = "singum_nodes.geojson"
-output_path = "singum_with_use_type.geojson"
-
-#Read parcel polygons from GDB 
-pluto_gdf = gpd.read_file(gdb_path, layer=pluto_layer)
-pluto_gdf["BBL"] = pluto_gdf["BBL"].astype(str)
-
-# === 2. Classify each lot as 'residential' or 'work' ===
-def classify_use(row):
-    res = row.get("ResArea", 0) or 0
-    work = (
-        (row.get("ComArea", 0) or 0) +
-        (row.get("OfficeArea", 0) or 0) +
-        (row.get("RetailArea", 0) or 0) +
-        (row.get("GarageArea", 0) or 0) +
-        (row.get("FactryArea", 0) or 0)
-    )
-    return "residential" if res >= work else "work"
-
-pluto_gdf["use_type"] = pluto_gdf.apply(classify_use, axis=1)
-pluto_gdf = pluto_gdf[~pluto_gdf["use_type"].isna()]
-
-# === 3. Load Singum polygons ===
-singum_gdf = gpd.read_file(singum_path)
-singum_gdf = singum_gdf.to_crs(pluto_gdf.crs)
-
-# === 4. Spatial join: Singums × intersecting parcels ===
-intersections = gpd.overlay(singum_gdf, pluto_gdf, how="intersection")
-dominant_use = intersections.groupby("NodeID")["use_type"].agg(lambda x: x.mode()[0])
-singum_gdf = singum_gdf.merge(dominant_use, on="NodeID", how="left")
-
-# === 6. Save the result ===
-
-singum_gdf.to_file(output_path, driver="GeoJSON")
-print(f"✅ Done. Result saved to {output_path}")
-
-'''
