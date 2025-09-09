@@ -511,7 +511,9 @@ def case_hex_with_disks(save_prefix=None, show=False, seed=42):
     # Paths (use node phi for greedy; Dijkstra on times)
     src = nearest_node(coords, src_c)
     dst = nearest_node(coords, dst_c)
-    greedy_nodes = greedy_path_on_nodes(phi, efrom, eto, src, dst)
+
+    #pass in coords
+    greedy_nodes = greedy_path_on_nodes(phi, efrom, eto, src, dst, coords = coords)
     dijk_nodes, dijk_time = dijkstra_path(coords, efrom, eto, etime, src, dst)
     greedy_time = path_time(greedy_nodes, time_map)
     ov = path_overlap(greedy_nodes, dijk_nodes)
