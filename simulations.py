@@ -141,13 +141,17 @@ def edge_orientation(p0, p1):
     dots = [abs(np.dot(vhat, b)) for b in bases]
     return ['horiz', 'vert', 'diag_br', 'diag_bl'][int(np.argmax(dots))]
 
-def assemble_kcl(coords, edges, speeds_mph=(20.0, 20.0, 25.0, 30.0), obstacle_fn=None, **kwargs):
+def assemble_kcl(coords, edges, speeds_mph=(20.0, 20.0, 25.0, 30.0), obstacle_fn=None, seed = None, **kwargs):
     """
     Symmetric KCL (same speed both directions) with orientation-based speeds.
     speeds_mph = (horiz, vert, diag_br (\\), diag_bl (/))
     Returns:
       M, time_map, efrom, eto, etime, K_edge
     """
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+    else:
+        rng = np.random.default_rng()
     mph_h, mph_v, mph_br, mph_bl = speeds_mph
     rows, cols, data = [], [], []
     efrom, eto, etime, K_edge = [], [], [], []
@@ -159,15 +163,15 @@ def assemble_kcl(coords, edges, speeds_mph=(20.0, 20.0, 25.0, 30.0), obstacle_fn
             continue
 
         ori = edge_orientation(p0, p1)
+        variation = 0.3  # 30%
         if ori == 'horiz':
-            mph = mph_h
+            mph = mph_h * (1 + rng.uniform(-variation, variation))
         elif ori == 'vert':
-            mph = mph_v
+            mph = mph_v * (1 + rng.uniform(-variation, variation))
         elif ori == 'diag_br':
-            mph = mph_br
+            mph = mph_br * (1 + rng.uniform(-variation, variation))
         else:
-            mph = mph_bl
-
+            mph = mph_bl * (1 + rng.uniform(-variation, variation))
         speed = mph * MPH_TO_MPS
         elen  = np.linalg.norm(p1 - p0)
         t     = elen / max(speed, 1e-9)
@@ -476,7 +480,7 @@ def case_hex_with_disks(save_prefix=None, show=False, seed=42):
     src_c = (0.30, W/2.0); dst_c = (L-0.30, W/2.0)
 
     # Assemble with random speeds
-    M, time_map, efrom, eto, etime, K_edge = assemble_kcl(coords, edges, speds_mph = (20,20,25,30))
+    M, time_map, efrom, eto, etime, K_edge = assemble_kcl(coords, edges, speeds_mph = (20,20,25,30), seed = seed)
 
     # Pin all nodes inside each disk (Dirichlet)
     r_src = np.linalg.norm(coords - np.array(src_c)[None,:], axis=1)
