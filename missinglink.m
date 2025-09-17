@@ -88,11 +88,17 @@ Z = griddata(coords(:,1), coords(:,2), V, X, Y, 'natural');
 
 % ---------------- Current density J = -sigma * grad(phi) ----------------
 % Triangulation on all nodes (same idea as your script)
-DT  = delaunayTriangulation(coords(:,1), coords(:,2));
-tri = DT.ConnectivityList;
-P   = DT.Points;
 
-t1 = tri(:,1); t2 = tri(:,2); t3 = tri(:,3);
+DT = delaunayTriangulation(coords(:, 1), coords(:, 2));  % constrained by edges
+tri = DT.ConnectivityList;
+P   = DT.Points; 
+
+% ---------------- Remove triangles containing the missing central edge ----------------
+mask_bad_tri = any(tri == central_edge(1) | tri == central_edge(2), 2);
+tri_clean = tri(~mask_bad_tri, :);
+
+% Extract triangle points for remaining triangles
+t1 = tri_clean(:,1); t2 = tri_clean(:,2); t3 = tri_clean(:,3);
 x1 = P(t1,1);  y1 = P(t1,2);
 x2 = P(t2,1);  y2 = P(t2,2);
 x3 = P(t3,1);  y3 = P(t3,2);
@@ -114,11 +120,26 @@ Jy_tri = -sigma_target .* dphidy;
 xc = (x1 + x2 + x3)/3;
 yc = (y1 + y2 + y3)/3;
 
-% Interpolate J onto plotting grid
-FJx = scatteredInterpolant(xc, yc, Jx_tri, 'natural','none');
-FJy = scatteredInterpolant(xc, yc, Jy_tri, 'natural','none');
-Jx = FJx(X, Y);
-Jy = FJy(X, Y);
+% Flatten triangles to nodes
+
+Jx_node = accumarray([t1;t2;t3], [Jx_tri;Jx_tri;Jx_tri], [N,1], @mean);
+Jy_node = accumarray([t1;t2;t3], [Jy_tri;Jy_tri;Jy_tri], [N,1], @mean);
+
+% Interpolate node-averaged J onto grid using linear
+
+FJx = scatteredInterpolant(coords(:,1), coords(:,2), Jx_node, 'linear','none');
+FJy = scatteredInterpolant(coords(:,1), coords(:,2), Jy_node, 'linear','none');
+
+%{
+FJx = scatteredInterpolant(xc, yc, Jx_tri, 'nearest','none');
+FJy = scatteredInterpolant(xc, yc, Jy_tri, 'nearest','none');
+%}
+
+Jx = FJx(X,Y);
+Jy = FJy(X,Y);
+
+
+
 
 % ---------------- Plots ----------------
 

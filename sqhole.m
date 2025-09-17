@@ -99,48 +99,77 @@ Z = griddata(coords(valid,1), coords(valid,2), V(valid), X, Y, 'natural');
 hole_mask = (X>=cx-hole_w/2 & X<=cx+hole_w/2 & Y>=cy-hole_h/2 & Y<=cy+hole_h/2);
 Z(hole_mask) = NaN;
 
-% ---------------- Current density J = -K * grad(V) ----------------
-% Build a triangulation on the valid nodes
+
+% ---------------- Current density J = -sigma * grad(V) (triangle-safe) ----------------
 coords_v = coords(valid,:);          % Nx2
 V_v      = V(valid);                 % Nx1
+
+% triangulation
 DT = delaunayTriangulation(coords_v(:,1), coords_v(:,2));
-tri = DT.ConnectivityList;           % Tx3, triangles by vertex ids (into coords_v)
-% Extract triangle vertices (vectors of length T = #triangles)
+tri = DT.ConnectivityList;           % Tx3
+
+% extract vertex coords and potentials for all triangles
 t1 = tri(:,1); t2 = tri(:,2); t3 = tri(:,3);
-x1 = coords_v(t1,1);  y1 = coords_v(t1,2);
-x2 = coords_v(t2,1);  y2 = coords_v(t2,2);
-x3 = coords_v(t3,1);  y3 = coords_v(t3,2);
+x1 = coords_v(t1,1); y1 = coords_v(t1,2);
+x2 = coords_v(t2,1); y2 = coords_v(t2,2);
+x3 = coords_v(t3,1); y3 = coords_v(t3,2);
+V1 = V_v(t1);      V2 = V_v(t2);    V3 = V_v(t3);
 
-% Potentials at triangle vertices
-V1 = V_v(t1);  V2 = V_v(t2);  V3 = V_v(t3);
-
-% Gradient of phi is constant inside each linear triangle
-% twiceA = signed 2*area; safe for mixed orientation
+% signed 2*area
 twiceA = (x2 - x1).*(y3 - y1) - (x3 - x1).*(y2 - y1);
-twiceA(abs(twiceA) < 1e-15) = NaN;  % guard degenerate tris
+area = 0.5*abs(twiceA);
 
+% triangle centroids
+xc_all = (x1 + x2 + x3)/3;
+yc_all = (y1 + y2 + y3)/3;
+
+% --- Filter triangles ---
+in_hole_centroid = (xc_all >= (cx - hole_w/2)) & (xc_all <= (cx + hole_w/2)) & ...
+                   (yc_all >= (cy - hole_h/2)) & (yc_all <= (cy + hole_h/2));
+
+good_tri = (~in_hole_centroid);
+
+% Keep only good triangles
+t1 = t1(good_tri); t2 = t2(good_tri); t3 = t3(good_tri);
+x1 = x1(good_tri); y1 = y1(good_tri);
+x2 = x2(good_tri); y2 = y2(good_tri);
+x3 = x3(good_tri); y3 = y3(good_tri);
+V1 = V1(good_tri); V2 = V2(good_tri); V3 = V3(good_tri);
+twiceA = twiceA(good_tri);
+area = area(good_tri);
+xc = xc_all(good_tri); yc = yc_all(good_tri);
+
+% guard against degenerate tris
+bad = abs(twiceA) < 1e-15;
+twiceA(bad) = NaN;
+area(bad) = NaN;
+
+% compute per-triangle gradients (use signed twiceA for correct direction)
 dphidx = ( V1.*(y2 - y3) + V2.*(y3 - y1) + V3.*(y1 - y2) ) ./ twiceA;
 dphidy = ( V1.*(x3 - x2) + V2.*(x1 - x3) + V3.*(x2 - x1) ) ./ twiceA;
 
-% Current density per triangle: J = -sigma * grad(phi)
+% Optionally guard/clip extremely large gradients to avoid noisy triangles
+max_grad = 1e6;  % tune based on expected scale of dphi/dx
+dphidx(abs(dphidx) > max_grad) = sign(dphidx(abs(dphidx) > max_grad)) * max_grad;
+dphidy(abs(dphidy) > max_grad) = sign(dphidy(abs(dphidy) > max_grad)) * max_grad;
+
+% triangle-wise current density
 Jx_tri = -sigma_target .* dphidx;
 Jy_tri = -sigma_target .* dphidy;
 
-% Triangle centroids (for interpolation to a continuous field)
-xc = (x1 + x2 + x3)/3;
-yc = (y1 + y2 + y3)/3;
+% Build interpolants from centroids of only the good triangles
+FJx = scatteredInterpolant(xc, yc, Jx_tri, 'natural', 'none');
+FJy = scatteredInterpolant(xc, yc, Jy_tri, 'natural', 'none');
 
-
-% Continuous field via scatteredInterpolant (no ringing)
-FJx = scatteredInterpolant(xc, yc, Jx_tri, 'natural','none');
-FJy = scatteredInterpolant(xc, yc, Jy_tri, 'natural','none');
-
-% Sample on your plot grid / lines
+% sample continuous fields (for visualization)
 Jx = FJx(X, Y);
 Jy = FJy(X, Y);
 
-% Mask the hole for plotting
+% mask hole (preserve NaN inside hole)
 Jx(hole_mask) = NaN;  Jy(hole_mask) = NaN;
+
+
+
 
 
 
