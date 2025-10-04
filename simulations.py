@@ -8,6 +8,7 @@ from scipy.sparse import csgraph
 from matplotlib.collections import LineCollection
 from matplotlib.patches import Rectangle, Circle
 
+
 MPH_TO_MPS = 0.44704
 
 # -------------------------- general helpers --------------------------
@@ -141,17 +142,13 @@ def edge_orientation(p0, p1):
     dots = [abs(np.dot(vhat, b)) for b in bases]
     return ['horiz', 'vert', 'diag_br', 'diag_bl'][int(np.argmax(dots))]
 
-def assemble_kcl(coords, edges, speeds_mph=(20.0, 20.0, 25.0, 30.0), obstacle_fn=None, seed = None, **kwargs):
+def assemble_kcl(coords, edges, speeds_mph=(20.0, 20.0, 25.0, 30.0), obstacle_fn=None, **kwargs):
     """
     Symmetric KCL (same speed both directions) with orientation-based speeds.
     speeds_mph = (horiz, vert, diag_br (\\), diag_bl (/))
     Returns:
       M, time_map, efrom, eto, etime, K_edge
     """
-    if seed is not None:
-        rng = np.random.default_rng(seed)
-    else:
-        rng = np.random.default_rng()
     mph_h, mph_v, mph_br, mph_bl = speeds_mph
     rows, cols, data = [], [], []
     efrom, eto, etime, K_edge = [], [], [], []
@@ -163,15 +160,15 @@ def assemble_kcl(coords, edges, speeds_mph=(20.0, 20.0, 25.0, 30.0), obstacle_fn
             continue
 
         ori = edge_orientation(p0, p1)
-        variation = 0.3  # 30%
         if ori == 'horiz':
-            mph = mph_h * (1 + rng.uniform(-variation, variation))
+            mph = mph_h
         elif ori == 'vert':
-            mph = mph_v * (1 + rng.uniform(-variation, variation))
+            mph = mph_v
         elif ori == 'diag_br':
-            mph = mph_br * (1 + rng.uniform(-variation, variation))
+            mph = mph_br
         else:
-            mph = mph_bl * (1 + rng.uniform(-variation, variation))
+            mph = mph_bl
+
         speed = mph * MPH_TO_MPS
         elen  = np.linalg.norm(p1 - p0)
         t     = elen / max(speed, 1e-9)
@@ -282,6 +279,62 @@ def singum_flow_per_node(coords, phi, efrom, eto, time_map, lattice, lp0):
 
     qx /= V_s; qy /= V_s
     return qx, qy
+
+
+# ---------- sizing helpers: 15–20 in x, ~10 in y ----------
+def lp0_for_square(L, W, nx_segments=18, ny_segments=10):
+    # square grid has spacing dx = 2*lp0; nx-1 = L/dx ≈ nx_segments
+    lp0_x = L / (2.0 * nx_segments)
+    lp0_y = W / (2.0 * ny_segments)
+    return min(lp0_x, lp0_y)
+
+def lp0_for_hex(L, W, nx_segments=18, ny_segments=10):
+    # hex grid: dx = 2*lp0; dy = sqrt(3)*lp0; target nx-1 ≈ nx_segments, ny-1 ≈ ny_segments
+    lp0_x = L / (2.0 * nx_segments)
+    lp0_y = W / (np.sqrt(3.0) * ny_segments)
+    return min(lp0_x, lp0_y)
+
+# ---------- total-flow scaling (enforce 1000 vehicles) ----------
+def total_outflow_from_set(phi, coords, efrom, eto, time_map, node_set):
+    node_set = set(map(int, np.asarray(node_set).ravel()))
+    Q = 0.0
+    for u, v in zip(efrom, eto):
+        if (u in node_set) ^ (v in node_set):  # exactly one in the set
+            t = time_map[(u, v)]
+            G = 1.0 / max(t, 1e-12)
+            Q += G * (phi[u] - phi[v]) if (u in node_set) else G * (phi[v] - phi[u])
+    return Q  # sign = out of the set
+
+def scale_phi_to_total_flow(phi, coords, efrom, eto, time_map, node_set, Q_target):
+    Q0 = total_outflow_from_set(phi, coords, efrom, eto, time_map, node_set)
+    if abs(Q0) < 1e-18:
+        return phi, 0.0
+    alpha = Q_target / Q0
+    return phi * alpha, alpha
+
+# ---------- plot K_ij (mobility) ----------
+def plot_mobility_tensors(coords, kxx, kxy, kyy, L, W, title_prefix='Mobility'):
+    # Interpolate to a grid for clean panels
+    ngx, ngy = 180, 140
+    xg = np.linspace(0, L, ngx); yg = np.linspace(0, W, ngy)
+    X, Y = np.meshgrid(xg, yg)
+    Kxx = griddata(coords, kxx, (X, Y), method='linear')
+    Kxy = griddata(coords, kxy, (X, Y), method='linear')
+    Kyy = griddata(coords, kyy, (X, Y), method='linear')
+
+    # Simple NaN-safe blur
+    Kxx = nan_gaussian_blur(Kxx, 0.8)
+    Kxy = nan_gaussian_blur(Kxy, 0.8)
+    Kyy = nan_gaussian_blur(Kyy, 0.8)
+
+    for Z, lab in [(Kxx, r'$K_{xx}$'), (Kxy, r'$K_{xy}$'), (Kyy, r'$K_{yy}$')]:
+        plt.figure(figsize=(6.6, 4.8))
+        plt.pcolormesh(X, Y, Z, shading='auto', cmap='viridis')
+        plt.colorbar(label=lab)
+        plt.gca().set_aspect('equal', adjustable='box')
+        plt.xlabel('x (m)'); plt.ylabel('y (m)')
+        plt.title(f'{title_prefix}: {lab}')
+        plt.tight_layout()
 
 # -------------------------- path extraction --------------------------
 
@@ -432,11 +485,17 @@ def plot_field_with_paths(X,Y,Phi,dPhidx,dPhidy, coords, src, dst,
                           greedy_coords=None, dijk_coords=None,
                           electrodes=None, hole_rect=None, crack_seg=None, title=''):
     plt.figure(figsize=(7.5,6))
-    plt.pcolormesh(X, Y, Phi, shading='auto', cmap='viridis')
-    step = max(1, int(min(X.shape)//40))
-    plt.quiver(X[::step,::step], Y[::step,::step],
-               -dPhidx[::step,::step], -dPhidy[::step,::step],
-               angles='xy', scale_units='xy', scale=1.0, color='k', width=0.002)
+    im = plt.pcolormesh(X, Y, Phi, shading='auto', cmap='viridis')
+    cbar = plt.colorbar(im, label='Potential V (arb.)')
+    # add smooth equipotential contours
+    try:
+        CS = plt.contour(X, Y, Phi, levels=12, colors='k', linewidths=0.8, alpha=0.55)
+        # optional labels on a few lines:
+        # plt.clabel(CS, inline=True, fontsize=8, fmt='%.2f')
+    except Exception:
+        pass
+
+    # (arrows are intentionally omitted)
     if greedy_coords is not None and len(greedy_coords)>0:
         plt.plot(greedy_coords[:,0], greedy_coords[:,1], 'c-', lw=3, label='Greedy steepest drop')
     if dijk_coords is not None and len(dijk_coords)>0:
@@ -471,40 +530,44 @@ def plot_graph_and_path(coords, efrom, eto, path_nodes, title=''):
 # -------------------------- CASES --------------------------
 
 def case_hex_with_disks(save_prefix=None, show=False, seed=42):
-    # Lattice
+    # Grid size: ~18 across x, ~10 across y
     L, W = 2.0, np.sqrt(3.0)
-    coords, edges, lp0, elen = build_tri_lattice(L=L, W=W, lp0=0.01)
+    lp0 = lp0_for_hex(L, W, nx_segments=18, ny_segments=10)
+    coords, edges, lp0, elen = build_tri_lattice(L=L, W=W, lp0=lp0)
 
     # Electrodes (disks) centered on midline
     R = 0.05
     src_c = (0.30, W/2.0); dst_c = (L-0.30, W/2.0)
 
-    # Assemble with random speeds
-    M, time_map, efrom, eto, etime, K_edge = assemble_kcl(coords, edges, speeds_mph = (20,20,25,30), seed = seed)
+    # Assemble (fix typo speeds_mph)
+    M, time_map, efrom, eto, etime, K_edge = assemble_kcl(
+        coords, edges, speeds_mph=(20,20,25,30)
+    )
 
-    # Pin all nodes inside each disk (Dirichlet)
+    # Dirichlet: pin all nodes inside each disk
     r_src = np.linalg.norm(coords - np.array(src_c)[None,:], axis=1)
     r_dst = np.linalg.norm(coords - np.array(dst_c)[None,:], axis=1)
-    src_nodes = np.where(r_src<=R)[0]
-    dst_nodes = np.where(r_dst<=R)[0]
-    ML, b = apply_dirichlet_row_replace(M, src_nodes, 1.0)
+    src_nodes = np.where(r_src<=R)[0]; dst_nodes = np.where(r_dst<=R)[0]
+    ML, b  = apply_dirichlet_row_replace(M, src_nodes, 1.0)
     ML, b2 = apply_dirichlet_row_replace(ML, dst_nodes, 0.0)
     b += b2
-    if len(src_nodes) == 0:
+    if len(src_nodes)==0:
         src_nodes = [nearest_node(coords, src_c)]
-        ML.rows[src_nodes[0]] = [src_nodes[0]]; ML.data[src_nodes[0]] = [1.0]; b[src_nodes[0]] = 1.0
-    if len(dst_nodes) == 0:
+        ML = ML.tolil(); ML.rows[src_nodes[0]]=[src_nodes[0]]; ML.data[src_nodes[0]]=[1.0]; b[src_nodes[0]] = 1.0; ML=ML.tocsr()
+    if len(dst_nodes)==0:
         dst_nodes = [nearest_node(coords, dst_c)]
-        ML.rows[dst_nodes[0]] = [dst_nodes[0]]; ML.data[dst_nodes[0]] = [1.0]; b[dst_nodes[0]] = 0.0
+        ML = ML.tolil(); ML.rows[dst_nodes[0]]=[dst_nodes[0]]; ML.data[dst_nodes[0]]=[1.0]; b[dst_nodes[0]] = 0.0; ML=ML.tocsr()
 
     phi = solve_with_component_pinning(ML, b, pinned_nodes=np.r_[src_nodes, dst_nodes])
 
-    # Singum mobility tensor per node (paper formula)
+    # --- Scale so total flow from the source disk equals 1000 vehicles ---
+    phi, alpha = scale_phi_to_total_flow(phi, coords, efrom, eto, time_map, src_nodes, Q_target=1000.0)
+
+    # Singum mobility tensor & flow (hex)
     kxx, kxy, kyy = singum_tensor_per_node(coords, efrom, eto, K_edge, lattice='hex', lp0=lp0)
-    # Singum flow per node
     qx_node, qy_node = singum_flow_per_node(coords, phi, efrom, eto, time_map, lattice='hex', lp0=lp0)
 
-    # Grid interpolation of potential (for field viz)
+    # Interpolate for viz
     ng = 260
     xg = np.linspace(0,L,ng); yg = np.linspace(0,W,ng)
     X,Y = np.meshgrid(xg,yg)
@@ -512,90 +575,188 @@ def case_hex_with_disks(save_prefix=None, show=False, seed=42):
     Phi = nan_gaussian_blur(Phi, 0.8)
     dPhidy, dPhidx = np.gradient(Phi, yg[1]-yg[0], xg[1]-xg[0], edge_order=2)
 
-    # Paths (use node phi for greedy; Dijkstra on times)
-    src = nearest_node(coords, src_c)
-    dst = nearest_node(coords, dst_c)
-
-    #pass in coords
-    greedy_nodes = greedy_path_on_nodes(phi, efrom, eto, src, dst, coords = coords)
+    # Paths (node potentials for greedy; Dijkstra on times)
+    src = nearest_node(coords, src_c); dst = nearest_node(coords, dst_c)
+    greedy_nodes = greedy_path_on_nodes(phi, efrom, eto, src, dst, coords=coords)
     dijk_nodes, dijk_time = dijkstra_path(coords, efrom, eto, etime, src, dst)
-    greedy_time = path_time(greedy_nodes, time_map)
-    ov = path_overlap(greedy_nodes, dijk_nodes)
+    greedy_time = path_time(greedy_nodes, time_map); ov = path_overlap(greedy_nodes, dijk_nodes)
 
-    title = f'Hex (disks): greedy={greedy_time:.3f}s, dijkstra={dijk_time:.3f}s, overlap={ov:.2f}'
+    title = f'Hexagonal lattice with source and sink'
     plot_field_with_paths(X,Y,Phi,dPhidx,dPhidy, coords, src, dst,
                           greedy_coords=coords[greedy_nodes] if greedy_nodes else None,
                           dijk_coords=coords[dijk_nodes] if dijk_nodes else None,
                           title=title)
-    plot_graph_and_path(coords, efrom, eto, dijk_nodes, title='Hex graph + Dijkstra path')
+
 
     if save_prefix:
         plt.savefig(f'{save_prefix}_field.png', dpi=220)
         plt.figure(2); plt.savefig(f'{save_prefix}_graph.png', dpi=220)
 
     if show: plt.show()
-    return dict(greedy_time=greedy_time, dijkstra_time=dijk_time, overlap=ov)
+    return dict(greedy_time=greedy_time, dijkstra_time=dijk_time, overlap=ov, alpha=alpha)
 
-def case_square_with_hole(save_prefix=None, show=False, seed=43):
-    # Lattice
+
+def case_square_with_hole(save_prefix=None, show=False, seed=44):
     L = W = 2.0
-    coords, edges, lp0, elen = build_square_lattice(L=L, W=W, lp0=0.01)
+    lp0 = lp0_for_square(L, W, nx_segments=18, ny_segments=10)
+    coords, edges, lp0, elen = build_square_lattice(L=L, W=W, lp0=lp0)
 
-    # Central rectangular hole
-    cx, cy = L/2, W/2; hole_w, hole_h = 0.40, 0.40
-    def obstacle_fn(p0,p1): return seg_intersects_rect(p0,p1, cx,cy, hole_w,hole_h)
+    cx, cy = L/2, W/2
+    hole_w, hole_h = 0.40, 0.40
+    def obstacle_fn(p0, p1): 
+        return seg_intersects_rect(p0, p1, cx, cy, hole_w, hole_h)
 
     M, time_map, efrom, eto, etime, K_edge = assemble_kcl(
-        coords, edges, speeds_mph=(20.0, 20.0, 25.0, 30.0), obstacle_fn=obstacle_fn, seed=seed
+        coords, edges, speeds_mph=(20.0, 20.0, 25.0, 30.0), obstacle_fn=obstacle_fn
     )
 
-    # Left/right Dirichlet (paper plate)
     tol = 1e-9
-    left_nodes  = np.where(np.abs(coords[:,0]-0.0)<=tol)[0]
-    right_nodes = np.where(np.abs(coords[:,0]-L  )<=tol)[0]
-    ML, b = apply_dirichlet_row_replace(M, left_nodes, 1.0)
-    ML, b2= apply_dirichlet_row_replace(ML, right_nodes, 0.0)
+    left_nodes  = np.where(np.abs(coords[:,0] - 0.0) <= tol)[0]
+    right_nodes = np.where(np.abs(coords[:,0] - L  ) <= tol)[0]
+    ML, b  = apply_dirichlet_row_replace(M, left_nodes, 1.0)
+    ML, b2 = apply_dirichlet_row_replace(ML, right_nodes, 0.0)
     b += b2
+
     phi = solve_with_component_pinning(ML, b, pinned_nodes=np.r_[left_nodes, right_nodes])
 
-    # Singum mobility tensor & flow
+    # Scale to Q_total = 1000 vehicles through the left plate
+    phi, alpha = scale_phi_to_total_flow(phi, coords, efrom, eto, time_map, left_nodes, Q_target=1000.0)
+
     kxx, kxy, kyy = singum_tensor_per_node(coords, efrom, eto, K_edge, lattice='square', lp0=lp0)
     qx_node, qy_node = singum_flow_per_node(coords, phi, efrom, eto, time_map, lattice='square', lp0=lp0)
 
-    # Grid field
-    ng=260; xg=np.linspace(0,L,ng); yg=np.linspace(0,W,ng); X,Y=np.meshgrid(xg,yg)
-    Phi = griddata(coords, phi, (X,Y), method='linear')
-    # mask hole region for viz
-    hole_mask = (X>=cx-hole_w/2)&(X<=cx+hole_w/2)&(Y>=cy-hole_h/2)&(Y<=cy+hole_h/2)
-    Phi[hole_mask]=np.nan
+    ng = 260
+    xg = np.linspace(0, L, ng); yg = np.linspace(0, W, ng)
+    X, Y = np.meshgrid(xg, yg)
+    Phi = griddata(coords, phi, (X, Y), method='linear')
+    hole_mask = (X >= cx - hole_w/2) & (X <= cx + hole_w/2) & (Y >= cy - hole_h/2) & (Y <= cy + hole_h/2)
+    Phi[hole_mask] = np.nan
     Phi = nan_gaussian_blur(Phi, 0.8)
-    dPhidy,dPhidx = np.gradient(Phi, yg[1]-yg[0], xg[1]-xg[0], edge_order=2)
+    dPhidy, dPhidx = np.gradient(Phi, yg[1]-yg[0], xg[1]-xg[0], edge_order=2)
 
-    # Paths: source/sink at mid-height left/right
-    src_c=(0.0, W/2); dst_c=(L, W/2)
-    src=nearest_node(coords, (0.0, W/2)); dst=nearest_node(coords, (L, W/2))
-    greedy_nodes = greedy_path_on_nodes(phi, efrom, eto, src, dst)
+    src = nearest_node(coords, (0.0, W/2))
+    dst = nearest_node(coords, (L,   W/2))
+    greedy_nodes = greedy_path_on_nodes(phi, efrom, eto, src, dst, coords=coords)
     dijk_nodes, dijk_time = dijkstra_path(coords, efrom, eto, etime, src, dst)
-    greedy_time = path_time(greedy_nodes, time_map)
-    ov = path_overlap(greedy_nodes, dijk_nodes)
+    greedy_time = path_time(greedy_nodes, time_map); ov = path_overlap(greedy_nodes, dijk_nodes)
 
-    title = f'Square (hole): greedy={greedy_time:.3f}s, dijkstra={dijk_time:.3f}s, overlap={ov:.2f}'
-    plot_field_with_paths(X,Y,Phi,dPhidx,dPhidy, coords, src, dst,
-                          greedy_coords=coords[greedy_nodes] if greedy_nodes else None,
-                          dijk_coords=coords[dijk_nodes] if dijk_nodes else None,
-                          hole_rect=(cx,cy,hole_w,hole_h), title=title)
-    plot_graph_and_path(coords, efrom, eto, dijk_nodes, title='Square-hole graph + Dijkstra path')
+    title = f'Square lattice with hole'
+    plot_field_with_paths(
+        X, Y, Phi, dPhidx, dPhidy, coords, src, dst,
+        greedy_coords=coords[greedy_nodes] if greedy_nodes else None,
+        dijk_coords=coords[dijk_nodes] if dijk_nodes else None,
+        hole_rect=(cx, cy, hole_w, hole_h),
+        title=title
+    )
 
     if save_prefix:
         plt.savefig(f'{save_prefix}_field.png', dpi=220)
         plt.figure(2); plt.savefig(f'{save_prefix}_graph.png', dpi=220)
-    if show: plt.show()
-    return dict(greedy_time=greedy_time, dijkstra_time=dijk_time, overlap=ov)
+    if show:
+        plt.show()
 
+    return dict(greedy_time=greedy_time, dijkstra_time=dijk_time, overlap=ov, alpha=alpha)
 
+def case_square_with_vertical_conductive_strip(save_prefix=None, show=False, seed=123):
+    L = W = 2.0
+    lp0 = lp0_for_square(L, W, nx_segments=18, ny_segments=10)
+    coords, edges, lp0, elen = build_square_lattice(L=L, W=W, lp0=lp0)
+
+    strip_xc   = L/2
+    strip_w    = 0.10
+    strip_y0   = 0.60   # bottom
+    strip_y1   = 1.40   # top
+    gain_gamma = 4.0
+
+    def in_strip(mx, my):
+        return (abs(mx - strip_xc) <= strip_w/2) and (strip_y0 <= my <= strip_y1)
+
+    mph_h, mph_v, mph_br, mph_bl = (20.0, 20.0, 25.0, 30.0)
+    rows, cols, data = [], [], []
+    efrom, eto, etime, K_edge = [], [], [], []
+    time_map = {}
+
+    for (u, v) in edges:
+        p0, p1 = coords[u], coords[v]
+        ori = edge_orientation(p0, p1)
+        mph = mph_h if ori == 'horiz' else mph_v if ori == 'vert' else mph_br if ori == 'diag_br' else mph_bl
+        speed = mph * MPH_TO_MPS
+        el = np.linalg.norm(p1 - p0)
+        t0 = el / max(speed, 1e-9)
+        G0 = 1.0 / max(t0, 1e-12)
+
+        mid = 0.5 * (p0 + p1)
+        gain = gain_gamma if in_strip(mid[0], mid[1]) else 1.0
+        G = G0 * gain; t = t0 / gain
+
+        rows += [u, v, u, v]; cols += [u, v, v, u]; data += [G, G, -G, -G]
+        efrom.append(u); eto.append(v); etime.append(t); K_edge.append(G)
+        time_map[(u, v)] = t; time_map[(v, u)] = t
+
+    M = sparse.csr_matrix((np.array(data, float),
+                           (np.array(rows, int), np.array(cols, int))),
+                          shape=(coords.shape[0], coords.shape[0]))
+    efrom = np.array(efrom, int); eto = np.array(eto, int)
+    etime = np.array(etime, float); K_edge = np.array(K_edge, float)
+
+    tol = 1e-12
+    left_nodes  = np.where(np.abs(coords[:, 0] - 0.0) <= tol)[0]
+    right_nodes = np.where(np.abs(coords[:, 0] - L  ) <= tol)[0]
+    ML, b  = apply_dirichlet_row_replace(M, left_nodes, 1.0)
+    ML, b2 = apply_dirichlet_row_replace(ML, right_nodes, 0.0)
+    b += b2
+
+    phi = solve_with_component_pinning(ML, b, pinned_nodes=np.r_[left_nodes, right_nodes])
+
+    # Scale to Q_total = 1000 vehicles through the left plate
+    phi, alpha = scale_phi_to_total_flow(phi, coords, efrom, eto, time_map, left_nodes, Q_target=1000.0)
+
+    kxx, kxy, kyy = singum_tensor_per_node(coords, efrom, eto, K_edge, lattice='square', lp0=lp0)
+    qx_node, qy_node = singum_flow_per_node(coords, phi, efrom, eto, time_map, lattice='square', lp0=lp0)
+
+    ng = 260
+    xg = np.linspace(0, L, ng); yg = np.linspace(0, W, ng)
+    X, Y = np.meshgrid(xg, yg)
+    Phi = griddata(coords, phi, (X, Y), method='linear')
+    Phi = nan_gaussian_blur(Phi, 0.8)
+    dPhidy, dPhidx = np.gradient(Phi, yg[1]-yg[0], xg[1]-xg[0], edge_order=2)
+
+    src = nearest_node(coords, (0.0, W/2))
+    dst = nearest_node(coords, (L,   W/2))
+    greedy_nodes          = greedy_path_on_nodes(phi, efrom, eto, src, dst, coords=coords)
+    dijk_nodes, dijk_time = dijkstra_path(coords, efrom, eto, etime, src, dst)
+    greedy_time           = path_time(greedy_nodes, time_map)
+    ov                    = path_overlap(greedy_nodes, dijk_nodes)
+
+    title = f'Square lattice with vertical conductive strip'
+    hole_rect = (strip_xc, 0.5*(strip_y0+strip_y1), strip_w, (strip_y1-strip_y0))  # visual only
+
+    plot_field_with_paths(
+        X, Y, Phi, dPhidx, dPhidy, coords, src, dst,
+        greedy_coords=coords[greedy_nodes] if greedy_nodes else None,
+        dijk_coords=coords[dijk_nodes] if dijk_nodes else None,
+        electrodes=None,
+        hole_rect=hole_rect,
+        title=title
+    )
+
+    if save_prefix:
+        plt.savefig(f'{save_prefix}_field.png', dpi=220)
+        plt.figure(2); plt.savefig(f'{save_prefix}_graph.png', dpi=220)
+    if show:
+        plt.show()
+
+    return dict(
+        gamma=gain_gamma, alpha=alpha,
+        strip_center_x=strip_xc, strip_width=strip_w, strip_y_span=(strip_y0, strip_y1),
+        greedy_time=float(greedy_time), dijkstra_time=float(dijk_time), overlap=float(ov)
+    )
 # -------------------------- MAIN: make 6 pop-up windows --------------------------
 
 if __name__ == "__main__":
     case_hex_with_disks(show=False, seed=42)
     case_square_with_hole(show=False, seed=43)
+    case_square_with_vertical_conductive_strip(show=False, seed=44)
+
+
     plt.show()
