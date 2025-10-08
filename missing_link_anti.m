@@ -1,4 +1,4 @@
-% Square lattice with one missing central link (same method as your script)
+% Square lattice with central unit zero conductivity
 clear; clc;
 
 % ---------------- Parameters (match your style) ----------------
@@ -13,12 +13,12 @@ nx = round(L/dx) + 1;
 ny = round(W/dy) + 1;
 sigma_target = 6e4; % sheet conductivity in J = -sigma * grad(phi) (S/m)
 sigma_x_out = 6e4;   % conductivity used by FEM in x outside the box
-sigma_y_out = 2e4;   % conductivity used by FEM in y outside the box
+sigma_y_out = 6e4;   % conductivity used by FEM in y outside the box
 
 use_inner_box = true;         % set to false if FEM has no special patch
-xL=0.9; xR=1.1; yB=0.9; yT=1.1;
-sigma_x_in = 3e4;             % FEM x-conductivity inside the box
-sigma_y_in = 9e4;             % FEM y-conductivity inside the box
+xL=0.9925; xR=1.0075; yB=0.9925; yT=1.0075;
+sigma_x_in = 2e4;             % FEM x-conductivity inside the box
+sigma_y_in = 2e4;             % FEM y-conductivity inside the box
 
 % ---------------- Generate nodes & connectivity (square grid) ----------------
 nodes    = zeros(nx*ny,3);   % [id, x, y]
@@ -52,6 +52,8 @@ end
 
 E  = size(edges,1);
 Ge = zeros(E,1);
+
+% ---------------- Assign conductivities, central unit zero ----------------
 for e = 1:E
     i  = edges(e,1); 
     j  = edges(e,2);
@@ -61,32 +63,29 @@ for e = 1:E
     dx_e = p1(1)-p0(1);
     dy_e = p1(2)-p0(2);
 
-    % choose which anisotropic pair applies at this edge (mirror FEM regions)
+    % Default outside conductivity
+    sx = sigma_x_out; sy = sigma_y_out;
+
+    % Inner central box: assign very small conductivities
     if use_inner_box && pm(1)>=xL && pm(1)<=xR && pm(2)>=yB && pm(2)<=yT
-        sx = sigma_x_in; sy = sigma_y_in;
-    else
-        sx = sigma_x_out; sy = sigma_y_out;
+        sx = sigma_x_in;
+        sy = sigma_y_in;
     end
 
-    % orientation: horizontal edge → x-flux; vertical edge → y-flux
-    if abs(dy_e) < 1e-15         % horizontal neighbor (east–west)
-        Ge(e) = sx;              % for square spacing h: width/length = h/h = 1
-    elseif abs(dx_e) < 1e-15     % vertical neighbor (north–south)
+    if abs(pm(1)-1.0) < 0.02 && abs(pm(2)-1.0) < 0.02
+        fprintf('Edge %5d: midpoint=(%.4f, %.4f), sx=%.2e, sy=%.2e\n', ...
+            e, pm(1), pm(2), sx, sy);
+    end
+
+    % Orientation: horizontal → x, vertical → y
+    if abs(dy_e) < 1e-15
+        Ge(e) = sx;
+    elseif abs(dx_e) < 1e-15
         Ge(e) = sy;
     else
         error('Non axis-aligned edge encountered.');
     end
 end
-
-% ---------------- Remove a single central link ----------------
-cx = L/2; cy = W/2;
-midpts = 0.5*(coords(edges(:,1),:) + coords(edges(:,2),:));
-[~, kmin] = min(vecnorm(midpts - [cx,cy], 2, 2));
-central_edge = edges(kmin,:);   % store for plotting
-edges(kmin,:) = [];             % remove that link
-Ge(kmin) = [];                  % keep Ge aligned with edges
-
-
 % ---------------- Assemble Laplacian (Kirchhoff) with anisotropic Ge -------
 M = sparse(N,N);
 b = zeros(N,1);
@@ -124,18 +123,12 @@ yg = linspace(0,W,400);
 Z = griddata(coords(:,1), coords(:,2), V, X, Y, 'natural');
 
 % ---------------- Current density J = -sigma * grad(phi) ----------------
-% Triangulation on all nodes (same idea as your script)
-
-DT = delaunayTriangulation(coords(:, 1), coords(:, 2));  % constrained by edges
+DT = delaunayTriangulation(coords(:, 1), coords(:, 2));  
 tri = DT.ConnectivityList;
 P   = DT.Points; 
 
-% ---------------- Remove triangles containing the missing central edge ----------------
-mask_bad_tri = sum(ismember(tri, central_edge), 2) == 2;
-tri_clean    = tri(~mask_bad_tri, :);
-
 % Extract triangle points for remaining triangles
-t1 = tri_clean(:,1); t2 = tri_clean(:,2); t3 = tri_clean(:,3);
+t1 = tri(:,1); t2 = tri(:,2); t3 = tri(:,3);
 x1 = P(t1,1);  y1 = P(t1,2);
 x2 = P(t2,1);  y2 = P(t2,2);
 x3 = P(t3,1);  y3 = P(t3,2);
@@ -143,9 +136,8 @@ x3 = P(t3,1);  y3 = P(t3,2);
 V1 = V(t1); V2 = V(t2); V3 = V(t3);
 
 twiceA = (x2 - x1).*(y3 - y1) - (x3 - x1).*(y2 - y1);
-twiceA(abs(twiceA) < 1e-15) = NaN;   % guard degenerate tris
+twiceA(abs(twiceA) < 1e-15) = NaN;
 
-% Gradients of phi in each triangle (piecewise linear)
 dphidx = ( V1.*(y2 - y3) + V2.*(y3 - y1) + V3.*(y1 - y2) ) ./ twiceA;
 dphidy = ( V1.*(x3 - x2) + V2.*(x1 - x3) + V3.*(x2 - x1) ) ./ twiceA;
 
@@ -156,7 +148,6 @@ xc = (x1(valid) + x2(valid) + x3(valid))/3;
 yc = (y1(valid) + y2(valid) + y3(valid))/3;
 
 if exist('sigma_x_out','var') && exist('sigma_y_out','var')
-    % Anisotropy by region (matches your FEM conditions)
     sigma_x_tri = sigma_x_out*ones(sum(valid),1);
     sigma_y_tri = sigma_y_out*ones(sum(valid),1);
     if exist('use_inner_box','var') && use_inner_box
@@ -167,57 +158,61 @@ if exist('sigma_x_out','var') && exist('sigma_y_out','var')
     Jx_tri = -sigma_x_tri .* dphidx(valid);
     Jy_tri = -sigma_y_tri .* dphidy(valid);
 else
-    % Fallback: isotropic
     Jx_tri = -sigma_target .* dphidx(valid);
     Jy_tri = -sigma_target .* dphidy(valid);
 end
 
-% Flatten triangles to nodes
-
+%{
 Jx_node = accumarray([t1;t2;t3], [Jx_tri;Jx_tri;Jx_tri], [N,1], @mean);
 Jy_node = accumarray([t1;t2;t3], [Jy_tri;Jy_tri;Jy_tri], [N,1], @mean);
 
-% Interpolate node-averaged J onto grid using linear
-
 FJx = scatteredInterpolant(coords(:,1), coords(:,2), Jx_node, 'linear','none');
 FJy = scatteredInterpolant(coords(:,1), coords(:,2), Jy_node, 'linear','none');
+%}
+FJx = scatteredInterpolant(xc, yc, Jx_tri, 'natural','none');
+FJy = scatteredInterpolant(xc, yc, Jy_tri, 'natural','none');
+
 Jx = FJx(X,Y);
 Jy = FJy(X,Y);
 
-
-
-
 % ---------------- Plots ----------------
-
-% 1) Heatmap of Jx (show missing link)
 figure('Color','w');
 pcolor(X, Y, Jx); shading interp; axis equal tight; box on
 colormap(cool); cb=colorbar; cb.Label.String='J_x (A/m)';
 xlabel('x (m)'); ylabel('y (m)');
 title('Current density J_x (A/m)');
-hold on;
-cu = coords(central_edge(1),:); 
-cv = coords(central_edge(2),:);
-plot([cu(1) cv(1)], [cu(2) cv(2)], 'k-', 'LineWidth', 3);
 
-% 2) Jx along midline (y = W/2) and quarterline (y = W/4)
 y_mid = W/2;
 y_quarter = W/4;
 
-JxI = griddedInterpolant({yg,xg}, Jx, 'linear','none'); % array order = (y,x)
+JxI = griddedInterpolant({yg,xg}, Jx, 'linear','none');
 Jx_mid     = JxI( y_mid    * ones(size(xg)), xg );
 Jx_quarter = JxI( y_quarter* ones(size(xg)), xg );
 
+data_case1 = readmatrix('current_density_Jx_center_fig4.csv');
+data_case2 = readmatrix('current_density_Jx_quarter_fig4.csv');
+
+x1 = data_case1(:,1); Jx1 = data_case1(:,3);
+x2 = data_case2(:,1); Jx2 = data_case2(:,3);
+
 figure('Color','w');
-plot(xg, Jx_mid, 'LineWidth',2, 'DisplayName', sprintf('y = %.2f (midline)', y_mid));
+plot(xg, Jx_mid, 'b-', 'LineWidth',2, 'DisplayName', sprintf('y = %.2f (midline)', y_mid));
 hold on;
-plot(xg, Jx_quarter, 'LineWidth',2, 'DisplayName', sprintf('y = %.2f (quarterline)', y_quarter));
+plot(xg, Jx_quarter, 'y--', 'LineWidth',2, 'DisplayName', sprintf('y = %.2f (quarterline)', y_quarter));
+
+plot(x1, Jx1, 'r-', 'LineWidth', 1.5, 'DisplayName','FEM Centerline');
+plot(x2, Jx2, 'g--', 'LineWidth', 1.5, 'DisplayName','FEM Quarterline');
+
+grid on; box on; axis tight;
+xlabel('x (m)'); ylabel('J_x (A/m)');
+title('Overlay: Square Mesh vs FEM current density J_x');
+legend('Location','best');
+%{
 grid on; box on; axis tight;
 xlabel('x (m)'); ylabel('J_x (A/m)');
 title('Current density J_x along midline and quarterline');
 legend('Location','best'); hold off;
-
-% (Optional) Heatmap of potential with contours (useful sanity check)
+%}
 figure('Color','w');
 pcolor(X, Y, Z); shading interp; hold on;
 contour(X, Y, Z, 20, 'k', 'LineWidth', 1);
